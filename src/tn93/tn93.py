@@ -42,21 +42,58 @@ def main(args):
     if len([x for x in fasta_sequences if len(str(x.seq)) != len(str(fasta_sequences[0].seq))]) > 0:
         logging.error("Sequence lengths not identical - all sequences should be aligned to a common reference and should be the same length")
         sys.exit(1)
+    import os
+    from concurrent.futures import ThreadPoolExecutor, as_completed
+
     match_mode = args.match_mode
-    final_distance = []
-    for i in range(len(fasta_sequences) - 1):
-        for j in range(i + 1, len(fasta_sequences)):
-            dist_value = tn93.tn93_distance(fasta_sequences[i], fasta_sequences[j], match_mode)
-            if not args.json_output:
-                dist_holder = dist_value.split(",")
-            final_distance += [dist_value if args.json_output else dist_holder]
-    with open(args.output, "w") as output_file:
-        if args.json_output:
-            json.dump(final_distance, output_file)
+
+    # Determine thread count from environment variable
+    num_threads = int(os.getenv("TN93_THREAD", "1"))
+    if num_threads > 1:
+        logging.error("TN93_THREAD is set to %s, which is not supported", num_threads)
+        sys.exit(1)
+
+    n = len(fasta_sequences)
+    pair_indices = [(i, j) for i in range(n - 1) for j in range(i + 1, n)]
+
+    # Set a reasonable batch size to balance memory and IO
+    # For large datasets, 10000-50000 is a good compromise
+    batch_size = 5000
+
+    def compute_distance(idx_pair):
+        i, j = idx_pair
+        dist_value = tn93.tn93_distance(fasta_sequences[i], fasta_sequences[j], match_mode)
+        if not args.json_output:
+            dist_holder = dist_value.split(",")
+            return dist_holder
         else:
+            return dist_value
+
+    def process_batches(write_func):
+        for batch_start in range(0, len(pair_indices), batch_size):
+            batch_end = min(batch_start + batch_size, len(pair_indices))
+            batch = pair_indices[batch_start:batch_end]
+            batch_results = [None] * len(batch)
+            with ThreadPoolExecutor(max_workers=num_threads) as executor:
+                future_to_idx = {executor.submit(compute_distance, batch[idx]): idx for idx in range(len(batch))}
+                for future in as_completed(future_to_idx):
+                    idx = future_to_idx[future]
+                    batch_results[idx] = future.result()
+            write_func(batch_results)
+
+    if args.json_output:
+        # For JSON, accumulate and write in batches, then merge all batches at the end
+        temp_batches = []
+        process_batches(lambda batch_results: temp_batches.append(batch_results))
+        # Flatten all batches and write once
+        final_distance = list(chain.from_iterable(temp_batches))
+        with open(args.output, "w") as output_file:
+            json.dump(final_distance, output_file)
+    else:
+        with open(args.output, "w", newline="") as output_file:
             writer = csv.writer(output_file)
             writer.writerow(["ID1", "ID2", "Distance"])
-            writer.writerows(final_distance)
+            process_batches(lambda batch_results: writer.writerows(batch_results))
 
 
 def setup_parser():
