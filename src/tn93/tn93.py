@@ -33,6 +33,8 @@ import threading
 import shutil
 import multiprocessing
 import threading
+import tempfile
+from tqdm import tqdm
 
 def get_process_usage(pid):
     process = psutil.Process(pid)
@@ -92,19 +94,16 @@ def main(args):
 
     temp_files = []
 
-    temp_dir = "/tmp/tn93_temdir"
-    if os.path.exists(temp_dir):
-        shutil.rmtree(temp_dir)
+    temp_dir = tempfile.mkdtemp(prefix="tn93_tmpdir_")
 
     count = len(fasta_sequences) - 1
 
-    from tqdm import tqdm
-
     progress_bar = None
+
+    tn93_thread = int(os.getenv("TN93_THREAD", "4"))
 
     def update_progress_bar(temp_dir):
         nonlocal progress_bar
-        last_count = 0
         while True:
             if os.path.exists(temp_dir):
                 file_count = len(os.listdir(temp_dir))
@@ -112,7 +111,6 @@ def main(args):
                     progress_bar = tqdm(total=count, desc=f"处理进度", ncols=80)
                 progress_bar.n = file_count
                 progress_bar.refresh()
-                last_count = file_count
                 if file_count >= count:
                     break
             time.sleep(1)
@@ -130,7 +128,7 @@ def main(args):
             tasks.append((i, fasta_sequences, tn93, match_mode, args.json_output, temp_path))
 
         # Use multiprocessing Pool
-        with multiprocessing.Pool(processes=min(multiprocessing.cpu_count(), 32)) as pool:
+        with multiprocessing.Pool(processes=min(multiprocessing.cpu_count(), tn93_thread)) as pool:
             pool.starmap(process_inner_loop, tasks)
         # 直接用文件追加方式合并，无需读入内存
         with open(args.output, "a", newline="") as output_file:
@@ -138,7 +136,6 @@ def main(args):
                 with open(temp_path, "r", newline="") as tmpfile:
                     for line in tmpfile:
                         output_file.write(line)
-                os.remove(temp_path)
     finally:
         # 合并后删除整个临时文件夹
         shutil.rmtree(temp_dir)
