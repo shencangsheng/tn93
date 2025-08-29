@@ -25,7 +25,46 @@ from itertools import chain
 from Bio import SeqIO
 import numpy as np
 import argparse
+import psutil
+import os
+import time
+import csv
+import threading
+import shutil
+import multiprocessing
+import threading
 
+def get_process_usage(pid):
+    process = psutil.Process(pid)
+    # 获取CPU使用率
+    cpu_usage = process.cpu_percent(interval=1)
+    
+    # 获取内存使用情况
+    memory_info = process.memory_info()
+    memory_usage = memory_info.rss / (1024 * 1024)  # 转换为MB
+    
+    return cpu_usage, memory_usage
+
+def monitor_process(interval=5):
+    pid = os.getpid()  # 获取当前进程的PID
+    while True:
+        cpu_usage, memory_usage = get_process_usage(pid)
+        print(f"当前进程 CPU 使用率: {cpu_usage}%")
+        print(f"当前进程 内存使用率: {memory_usage} MB")
+        print("-" * 20)
+        time.sleep(interval)
+
+
+
+def process_inner_loop(i, fasta_sequences, tn93, match_mode, json_output, temp_path):
+    rows = []
+    for j in range(i + 1, len(fasta_sequences)):
+        dist_value = tn93.tn93_distance(fasta_sequences[i], fasta_sequences[j], match_mode)
+        dist_holder = dist_value.split(",")
+        rows.append(dist_holder)
+    with open(temp_path, "w", newline="") as tmpfile:
+        writer = csv.writer(tmpfile)
+        writer.writerows(rows)
 
 def main(args):
     parser = setup_parser()
@@ -42,59 +81,67 @@ def main(args):
     if len([x for x in fasta_sequences if len(str(x.seq)) != len(str(fasta_sequences[0].seq))]) > 0:
         logging.error("Sequence lengths not identical - all sequences should be aligned to a common reference and should be the same length")
         sys.exit(1)
-    import os
-    from concurrent.futures import ThreadPoolExecutor, as_completed
-
     match_mode = args.match_mode
 
-    # Determine thread count from environment variable
-    num_threads = int(os.getenv("TN93_THREAD", "1"))
-    if num_threads > 1:
-        logging.error("TN93_THREAD is set to %s, which is not supported", num_threads)
-        sys.exit(1)
 
-    n = len(fasta_sequences)
-    pair_indices = [(i, j) for i in range(n - 1) for j in range(i + 1, n)]
 
-    # Set a reasonable batch size to balance memory and IO
-    # For large datasets, 10000-50000 is a good compromise
-    batch_size = 5000
+    # 先写表头
+    with open(args.output, "w", newline="") as output_file:
+        writer = csv.writer(output_file)
+        writer.writerow(["ID1", "ID2", "Distance"])
 
-    def compute_distance(idx_pair):
-        i, j = idx_pair
-        dist_value = tn93.tn93_distance(fasta_sequences[i], fasta_sequences[j], match_mode)
-        if not args.json_output:
-            dist_holder = dist_value.split(",")
-            return dist_holder
-        else:
-            return dist_value
+    temp_files = []
 
-    def process_batches(write_func):
-        for batch_start in range(0, len(pair_indices), batch_size):
-            batch_end = min(batch_start + batch_size, len(pair_indices))
-            batch = pair_indices[batch_start:batch_end]
-            batch_results = [None] * len(batch)
-            with ThreadPoolExecutor(max_workers=num_threads) as executor:
-                future_to_idx = {executor.submit(compute_distance, batch[idx]): idx for idx in range(len(batch))}
-                for future in as_completed(future_to_idx):
-                    idx = future_to_idx[future]
-                    batch_results[idx] = future.result()
-            write_func(batch_results)
+    temp_dir = "/tmp/tn93_temdir"
+    if os.path.exists(temp_dir):
+        shutil.rmtree(temp_dir)
 
-    if args.json_output:
-        # For JSON, accumulate and write in batches, then merge all batches at the end
-        temp_batches = []
-        process_batches(lambda batch_results: temp_batches.append(batch_results))
-        # Flatten all batches and write once
-        final_distance = list(chain.from_iterable(temp_batches))
-        with open(args.output, "w") as output_file:
-            json.dump(final_distance, output_file)
-    else:
-        with open(args.output, "w", newline="") as output_file:
-            writer = csv.writer(output_file)
-            writer.writerow(["ID1", "ID2", "Distance"])
-            process_batches(lambda batch_results: writer.writerows(batch_results))
+    count = len(fasta_sequences) - 1
 
+    from tqdm import tqdm
+
+    progress_bar = None
+
+    def update_progress_bar(temp_dir):
+        nonlocal progress_bar
+        last_count = 0
+        while True:
+            if os.path.exists(temp_dir):
+                file_count = len(os.listdir(temp_dir))
+                if progress_bar is None:
+                    progress_bar = tqdm(total=count, desc=f"处理进度", ncols=80)
+                progress_bar.n = file_count
+                progress_bar.refresh()
+                last_count = file_count
+                if file_count >= count:
+                    break
+            time.sleep(1)
+
+    count_thread = threading.Thread(target=update_progress_bar, args=(temp_dir,), daemon=True)
+    count_thread.start()
+        
+    os.makedirs(temp_dir, exist_ok=True)
+    try:
+        # Prepare arguments for each process
+        tasks = []
+        for i in range(len(fasta_sequences) - 1):
+            temp_path = os.path.join(temp_dir, f"tn93_tmp_{i}.csv")
+            temp_files.append(temp_path)
+            tasks.append((i, fasta_sequences, tn93, match_mode, args.json_output, temp_path))
+
+        # Use multiprocessing Pool
+        with multiprocessing.Pool(processes=min(multiprocessing.cpu_count(), 32)) as pool:
+            pool.starmap(process_inner_loop, tasks)
+        # 直接用文件追加方式合并，无需读入内存
+        with open(args.output, "a", newline="") as output_file:
+            for temp_path in temp_files:
+                with open(temp_path, "r", newline="") as tmpfile:
+                    for line in tmpfile:
+                        output_file.write(line)
+                os.remove(temp_path)
+    finally:
+        # 合并后删除整个临时文件夹
+        shutil.rmtree(temp_dir)
 
 def setup_parser():
     parser = argparse.ArgumentParser()
@@ -639,4 +686,8 @@ class TN93(object):
 
 
 if __name__ == "__main__":
+    start_time = time.time()  # 记录开始时间
     main(sys.argv[1:])
+    end_time = time.time()  # 记录结束时间
+    execution_time = end_time - start_time  # 计算执行时间
+    print(f"代码执行时间: {execution_time} 秒")
