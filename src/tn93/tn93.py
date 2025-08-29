@@ -25,7 +25,6 @@ from itertools import chain
 from Bio import SeqIO
 import numpy as np
 import argparse
-import psutil
 import os
 import time
 import csv
@@ -35,28 +34,6 @@ import multiprocessing
 import threading
 import tempfile
 from tqdm import tqdm
-
-def get_process_usage(pid):
-    process = psutil.Process(pid)
-    # 获取CPU使用率
-    cpu_usage = process.cpu_percent(interval=1)
-    
-    # 获取内存使用情况
-    memory_info = process.memory_info()
-    memory_usage = memory_info.rss / (1024 * 1024)  # 转换为MB
-    
-    return cpu_usage, memory_usage
-
-def monitor_process(interval=5):
-    pid = os.getpid()  # 获取当前进程的PID
-    while True:
-        cpu_usage, memory_usage = get_process_usage(pid)
-        print(f"当前进程 CPU 使用率: {cpu_usage}%")
-        print(f"当前进程 内存使用率: {memory_usage} MB")
-        print("-" * 20)
-        time.sleep(interval)
-
-
 
 def process_inner_loop(i, fasta_sequences, tn93, match_mode, json_output, temp_path):
     rows = []
