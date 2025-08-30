@@ -77,7 +77,7 @@ def main(args):
 
     progress_bar = None
 
-    tn93_thread = int(os.getenv("TN93_THREAD", "4"))
+    num_threads = int(os.getenv("TN93_THREAD")) if os.getenv("TN93_THREAD") is not None else int(args.num_threads)
 
     def update_progress_bar(temp_dir):
         nonlocal progress_bar
@@ -85,7 +85,7 @@ def main(args):
             if os.path.exists(temp_dir):
                 file_count = len(os.listdir(temp_dir))
                 if progress_bar is None:
-                    progress_bar = tqdm(total=count, desc=f"处理进度", ncols=80)
+                    progress_bar = tqdm(total=count, desc=f"Progress bar", ncols=80)
                 progress_bar.n = file_count
                 progress_bar.refresh()
                 if file_count >= count:
@@ -105,9 +105,8 @@ def main(args):
             tasks.append((i, fasta_sequences, tn93, match_mode, args.json_output, temp_path))
 
         # Use multiprocessing Pool
-        with multiprocessing.Pool(processes=min(multiprocessing.cpu_count(), tn93_thread)) as pool:
+        with multiprocessing.Pool(processes=min(multiprocessing.cpu_count(), num_threads)) as pool:
             pool.starmap(process_inner_loop, tasks)
-        # 直接用文件追加方式合并，无需读入内存
         with open(args.output, "a", newline="") as output_file:
             for temp_path in temp_files:
                 with open(temp_path, "r", newline="") as tmpfile:
@@ -181,6 +180,14 @@ def setup_parser():
         action="store_true",
         default=False,
         help="Should the output be in JSON format? (Default: False)",
+    )
+    parser.add_argument(
+        "-t",
+        "--num_threads",
+        action="store",
+        required=False,
+        default=2,
+        help="Number of threads to use (Default: 2)",
     )
     return parser
 
